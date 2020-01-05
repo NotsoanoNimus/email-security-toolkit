@@ -51,7 +51,7 @@ function usage() {
     echo "    -d    Put the script into debug mode. BEWARE, this will generate"
     echo "           significantly more output as a step-by-step for the script."
     echo "    -r    Check the given IPv4 address against a list of popular DNSBLs."
-    echo "    -R    Same as above but with IPv6 addresses (EXPERIMENTAL,TENTATIVE)."
+    echo "    -R    Same as above but with IPv6 addresses."
     echo
     echo "NOTES:"
     echo " - Multiple space-separated domains can be passed to this script"
@@ -272,7 +272,6 @@ function getMX() {
 function getPTR() {
     local PTR_RECORD=
     # Check the value against the pattern for an IPv4 address.
-    local IP4_PATTERN='^((1\d{2}|2[0-4]\d|25[0-5]|\d{1,2})\.){3}(1\d{2}|2[0-4]\d|25[0-5]|\d{1,2})$'
     if [[ $(isValidIpv4Address "${1}") -eq 0 ]]; then
         # Reverse the IPv4 address and append '.in-addr.arpa'.
         local REVERSED_IP="$(printf "%s" "${1}." | tac -s'.')in-addr.arpa"
