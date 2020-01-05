@@ -28,86 +28,16 @@
 ######################################################################################
 
 # Include common functions.
-source ../common/common.sh
+SCRIPTPATH="$( cd "$(dirname "$0")" ; pwd -P )"
+source "${SCRIPTPATH}/../common/common.sh"
+if [ $? -ne 0 ]; then
+    echo "~~ Failed to source the \"${SCRIPTPATH}/../common/common.sh\" file."
+    exit 200
+fi
 
 
-
-# Main function for the script, where the actual actions are taken.
-function quickDNS_main() {
-    # Unset some variables.
-    clearVars "DOMAINS MX_IP_LIST NO_COLORS V4_LOOKUP V6_LOOKUP SKIP_GET_DOMAIN PTR_RECORD FULL_IP REVERSED_IP"
-
-    [[ "${1:0:2}" == "-R" || "${1:0:2}" == "-r" ]] \
-        && SKIP_GET_DOMAIN="YES"
-    # The first arg to the program must be a QUOTED list of space-separated domains to check.
-    if [ -z "${SKIP_GET_DOMAIN}" ]; then
-        if [[ -z "$1" || -z `echo "${1}" | grep -Poi '^([a-z0-9\.\-]+\.[a-z]{2,})(\s+[a-z0-9\.\-]+\.[a-z]{2,})*'` ]]; then
-            usage
-        else
-            DOMAINS="${1}"
-            # Remove this from the lineup of arguments, to check any options below.
-            shift
-        fi
-    fi
-
-    # DEFAULT_OPTIONS: Default options for the timeout on the 'dig' lookups that aren't fallback lookups.
-    DEFAULT_OPTIONS="+time=2 +tries=2 +short"
-
-    # Interpret arguments to the program.
-    while getopts dnR:r: opts; do
-        case $opts in
-            n) NO_COLORS="YES" ;;
-            r) [[ -n "${V6_LOOKUP}" || -n "${DOMAINS}" ]] \
-                && echo "You must use the -r flag with a valid IPv4 address, and without any domains." && usage
-                V4_LOOKUP="${OPTARG}" ;;
-            R) [[ -n "${V4_LOOKUP}" || -n "${DOMAINS}" ]] \
-                && echo "You must use the -R flag with a valid IPv6 address, and without any domains." && usage
-                V6_LOOKUP="${OPTARG}" ;;
-            d) set -x ;;
-            #:) echo "Option -${OPTARG} requires an argument." >&2 ;;
-            *) usage ;;
-        esac
-    done
-
-    # Terminal color setup and dependency check.
-    colors "${NO_COLORS}"
-    depCheck "dig host grep awk sed tr printf cut head tac"
-
-    # Run RBL Lookup function if -r or -R flag was present.
-    # Validation happens inside function call
-    if [[ -n "${V4_LOOKUP}" || -n "${V6_LOOKUP}" ]]; then
-        # The below will work because only one of the two can be defined anyway.
-        RBL_CHECK_ADDR="${V4_LOOKUP}${V6_LOOKUP}"
-        echo "Checking RBLs for IP address: ${TC_PURPLE}${RBL_CHECK_ADDR}${TC_NORMAL}"
-        getPTR "${RBL_CHECK_ADDR}"
-        checkAllRBLs "${RBL_CHECK_ADDR}"
-        echo && exit 0
-    fi
-
-    # Begin the main loop.
-    for fqdn in ${DOMAINS[@]}; do
-        # Run the script for a domain. Start by resetting variables and then crunching the DNS.
-        clearVars "NAME_SERVER SPF_RECORD DMARC_RECORD MX_RECORD_OUT MX_RECORDS A_RECORD MX_IP_LIST PTR_RECORD FULL_IP REVERSED_IP"
-        DOMAIN="${fqdn}"
-        printBanner "${fqdn}"
-
-        getNameServers
-        getSPF
-        getDMARC
-        getMX
-        RBL_CHECKED_IPS=
-        RBL_getALookup
-        RBL_getMXLookup
-        echo
-    done
-}
-
-################################################################
-###################### Pre-Script Modules ######################
-################################################################
-
-
-# Usage information for the script. Terse and easy since this isn't a gargantuan script.
+# usage
+# -- Usage information for the script. Terse and easy since this isn't a gargantuan script.
 function usage() {
     echo "USAGE: $0 \"domain.name [domain.two domain.three ... domain.n]\" [OPTIONS]"
     echo "-- OR -- $0 {-r ipv4-addr | -R ipv6-addr}"
@@ -130,91 +60,183 @@ function usage() {
     exit 1
 }
 
-# ARGS
+# quickDNS_main
+# -- Main function for the script, where the actual actions are taken.
+function quickDNS_main() {
+    # If the EMAIL_SECURITY_COMMON import isn't defined, then the common functions are not available. Exit!
+    [ -z "${EMAIL_SECURITY_COMMON}" ] && echo "The script could not import the required common library, and therefore could not run. Aborting." && exit 1
+    # Immediately set up the trap for the cleanup function on exit.
+    trap cleanup EXIT
+    # Set up the environment with a clean slate, and verify passed arguments.
+    initialize "$@"
+
+    # Run RBL Lookup function if -r or -R flag was present.
+    if [[ -n "${V4_LOOKUP}" || -n "${V6_LOOKUP}" ]]; then
+        if [[ "$(getPTR "${RBL_CHECK_ADDR}")" == "invalid IP" ]]; then
+            echo "Invalid IP address provided. Please review the address given and correct any mistakes."
+            echo && exit 180
+        fi
+        # The below will work because only one of the two can be defined anyway for the script to pass initialization.
+        echo "Checking RBLs for IP address: ${TC_PURPLE}${V4_LOOKUP}${V6_LOOKUP}${TC_NORMAL}"
+        checkAllRBLs "${V4_LOOKUP}${V6_LOOKUP}"
+        echo && exit 0
+    fi
+
+    # Begin the main loop.
+    for fqdn in ${DOMAINS[@]}; do
+        # Run the script for a domain. Start by resetting variables.
+        clearVars "NAME_SERVER SPF_RECORD DMARC_RECORD MX_RECORD_OUT MX_RECORDS A_RECORD MX_IP_LIST PTR_RECORD FULL_IP REVERSED_IP"
+        # Set the DOMAIN variable.
+        DOMAIN="${fqdn}"
+        # Print the starting banner.
+        printBanner "${fqdn}"
+        # Get all information for the given FQDN, displaying it along the way.
+        getNameServers
+        getSPF
+        getDMARC
+        getMX
+        # Reset the list of IP addresses that have already been checked against RBLs.
+        #  This 'tracker' actually probably shouldn't be reset, but keeping this for now.
+        RBL_CHECKED_IPS=
+        RBL_CHECKED_IPS_A=
+        # Check the A-record IP against RBLs, then the MX record IP(s).
+        RBL_getALookup
+        RBL_getMXLookup
+        # Output a blank line and continue.
+        echo
+    done
+}
+
+# cleanup
+# -- Clean up any temporary files with a trap. This may not be needed but is scaffolding.
+function cleanup() {
+    :
+}
+
+# initialize
+# -- Set up the script environment. This function is critical to proper script operation.
+function initialize() {
+    # Unset some variables, in case they're defined.
+    clearVars "DOMAINS MX_IP_LIST NO_COLORS V4_LOOKUP V6_LOOKUP SKIP_GET_DOMAIN PTR_RECORD FULL_IP REVERSED_IP"
+    # The first arg to the program must be a QUOTED list of space-separated domains to check.
+    #  If the first parameter is instead a '-r' or '-R', skip this step.
+    if [[ "${1:0:2}" != "-R" && "${1:0:2}" != "-r" ]]; then
+        # If the first parameter does NOT appear to be a list of hostnames/FQDNs, show the usage.
+        if [[ -z "$1" || -z `echo "${1}" | grep -Poi '^([a-z0-9\.\-]+\.[a-z]{2,})(\s+[a-z0-9\.\-]+\.[a-z]{2,})*'` ]]; then
+            usage
+        else
+            # Otherwise, set the DOMAINS variable value.
+            DOMAINS="${1}"
+            # Remove this from the lineup of arguments, to check any options below.
+            shift
+        fi
+    fi
+    # DEFAULT_OPTIONS: Default options for the timeout on the 'dig' lookups that aren't fallback lookups.
+    DEFAULT_OPTIONS="+time=2 +tries=2 +short"
+    # Interpret arguments to the program.
+    while getopts dnR:r: opts; do
+        case $opts in
+            # Disable colors.
+            n) NO_COLORS="YES" ;;
+            # Set up the IPv4 address value, provided the IPv6 value isn't set.
+            r) [[ -n "${V6_LOOKUP}" || -n "${DOMAINS}" ]] \
+                && echo "You must use the -r flag with a valid IPv4 address, and without any domains." && usage
+                V4_LOOKUP="${OPTARG}" ;;
+            # Same here, but vice-versa. This prevents -r and -R from being used simultaneously.
+            R) [[ -n "${V4_LOOKUP}" || -n "${DOMAINS}" ]] \
+                && echo "You must use the -R flag with a valid IPv6 address, and without any domains." && usage
+                V6_LOOKUP="${OPTARG}" ;;
+            # Enable debug mode.
+            d) set -x ;;
+            # Any invalid options? Display the usage/help.
+            *) usage ;;
+        esac
+    done
+    # Terminal color setup and dependency check.
+    colors "${NO_COLORS}"
+    checkDependencies "dig host grep awk sed tr printf cut head tac"
+}
+
+
+################################################################
+##################  Script Modules/Functions  ##################
+################################################################
+
+# printBanner
+# -- Print a header banner for a section (IP or hostname/domain).
+# PARAMS:
 #   $1 The domain name or IP adress used to print the banner
 function printBanner() {
     echo "################################################################################"
     echo "Checking DNS information for ${TC_BOLD}${TC_YELLOW}${1}${TC_NORMAL}..."
 }
 
-# Check for the necessary commands that aren't native to all Linux/UNIX systems.
-# ARGS:
-#   $1 = string of space-separated dependencies.
-function depCheck() {
-    # Build a space-separated list of dependencies for this script.
-    local DEPENDENCIES="$1"
-    # Let the user know what deps are required (off for now).
-    #echo "Checking for necessary dependencies: ${TC_BLUE}${DEPENDENCIES}${TC_NORMAL}"
-    # Set the separator/delimiter to ' '
-    IFS=' '
-    # Iterate through each command above and check for its existence in the $PATH variable using the 'command' command.
-    for needed in ${DEPENDENCIES[@]}; do
-        command -v $needed 2>&1 >/dev/null
-        if [ $? -ne 0 ]; then
-            echo "${TC_RED}ERROR${TC_NORMAL}: Missing dependency command \"${TC_BLUE}${needed}${TC_NORMAL}\"."
-            echo "    Please install this on your local machine and try again."
-            exit 255
-        fi
-    done
-}
-
-# Clear all variables associated with the below DNS lookup/parsing functions (in the Script Modules section).
+# clearVars
+# -- Clear all variables associated with the below DNS lookup/parsing functions (in the Script Modules section).
 function clearVars() {
     for x in "$@"; do unset `echo $x`; done
 }
 
-################################################################
-##################  Script Modules/Functions  ##################
-################################################################
-
-# Choose the first name server returned from a DIG NS and use it for all future queries.
+# getNameServers
+# -- Choose the first name server returned from a DIG NS and use it for all future queries.
 # TODO: add a name-server tester to avoid delays in future lookups.
 function getNameServers() {
-    NAME_SERVER=$(dig ns ${DEFAULT_OPTIONS} ${DOMAIN} | head -1)
+    NAME_SERVER=$(dig ns ${DEFAULT_OPTIONS} ${DOMAIN} | head -n1)
     # Check to ensure that name-server exists and is a valid host. If not, fall back to GoogleDNS.
     [[ -z "$NAME_SERVER" || -z `host ${NAME_SERVER} | grep -Pv '(NXDOMAIN)|not found'` ]] && NAME_SERVER="8.8.8.8"
     printf "${TC_BLUE}Primary Nameserver${TC_NORMAL}: "
     [[ "${NAME_SERVER}" == "8.8.8.8" ]] \
-    && echo "NONE (defaulting to ${TC_BOLD}8.8.8.8${TC_NORMAL} Google Public DNS)" || echo "${NAME_SERVER}"
+        && echo "NONE (defaulting to ${TC_BOLD}8.8.8.8${TC_NORMAL} [Google Public DNS])" || echo "${NAME_SERVER}"
 }
 
-# Get the SPF record(s) for the domain.
-## Keeping the "grep" below without a "head/tail" operation or pipe,
-## to tell the user of the script if there are multiple SPF records.
+# getSPF
+# -- Get the SPF record(s) for the domain.
+# --  Keeping the "grep" below without a "head/tail" operation or pipe,
+# --  to tell the user of the script if there are multiple SPF records.
 function getSPF() {
+    # Try the lookup and check the fallback option as needed.
     SPF_RECORD=$(dig txt ${DEFAULT_OPTIONS} ${DOMAIN} @${NAME_SERVER})
     (checkFallbackLookup "$SPF_RECORD") || SPF_RECORD=$(fallbackLookup "${DOMAIN}" "txt" "1.1.1.1")
     SPF_RECORD=$(echo "${SPF_RECORD}" | grep -i "v=spf1")
+    # Still nothing? Set the display text to NONE.
     [ -z "$SPF_RECORD" ] && SPF_RECORD="NONE"
-    if [[ $(echo ${SPF_RECORD} | wc -l) -gt 1 ]]; then
+    # If the amount of lines matching 'v=spf1' is greater than one, provide a warning.
+    if [[ $(echo "${SPF_RECORD}" | wc -l) -gt 1 ]]; then
         echo "${TC_CYAN}WARNING${TC_NORMAL}: Multiple SPF Records Found! There should only be 1 SPF Record per domain."
         SPF_RECORD=$(echo ${SPF_RECORD} | tr '\n' ';' | sed 's,;$,,')
         oldIFS=${IFS} && IFS=';' read -ra SPF_RECORD <<< ${SPF_RECORD}
+        # Provide an indexed SPF_RECORD display.
         for i in "${!SPF_RECORD[@]}"; do
             echo -e "${TC_CYAN}SPF Record ($((${i}+1)))${TC_NORMAL}:\t${SPF_RECORD[${i}]}"
         done
         IFS=${oldIFS}
     else
+        # Otherwise, just output the record (even if nothing was found).
         echo -e "${TC_CYAN}SPF Record${TC_NORMAL}:\t${SPF_RECORD}"
     fi
 }
 
-# Get the DMARC record for the domain.
-## Nothing really special here.
+# getDMARC
+# -- Get the DMARC record for the domain. Nothing really special here.
 function getDMARC() {
+    # Try the lookup and check the fallback option as needed.
     DMARC_RECORD=$(dig txt ${DEFAULT_OPTIONS} _dmarc.${DOMAIN} @${NAME_SERVER} | head -1 | sed 's/\\//g')
     [ -z "$DMARC_RECORD" ] && DMARC_RECORD="NONE"
     (checkFallbackLookup "$DMARC_RECORD") || DMARC_RECORD=$(fallbackLookup "_dmarc.${DOMAIN}" "txt" "1.1.1.1")
+    # Display the record information.
     echo "${TC_RED}DMARC Record${TC_NORMAL}: ${DMARC_RECORD}"
 }
 
-# Get the A record for the domain
+# getA
+# -- Return the (last-found) A-record for the domain.
 function getA() {
     echo "`dig ${DEFAULT_OPTIONS} a ${1} | tail -n1`"
 }
 
-# Get the MX record(s) for the domain.
+# getMX
+# -- Get the MX record(s) for the domain.
 function getMX() {
+    # Try the lookup and check the fallback option as needed.
     MX_RECORDS=$(dig mx ${DEFAULT_OPTIONS} ${DOMAIN} @${NAME_SERVER})
     (checkFallbackLookup "$MX_RECORDS") || MX_RECORDS=$(fallbackLookup "$DOMAIN" "mx" "1.1.1.1")
     MX_RECORDS=$(echo "$MX_RECORDS" | sed -r 's/^(\s|\t)*/\t/g' | tr '\n' ' ')
@@ -224,19 +246,17 @@ function getMX() {
         && MX_RECORD_OUT="NONE" && echo -e "${TC_GREEN}MX Record(s)${TC_NORMAL}: NONE\n" && return
     MX_RECORD_OUT=
     for hostname in $MX_RECORDS; do
-        if [[ -n `echo "$hostname" | grep -Poi '^[a-zA-Z0-9\-\.]+\.[a-zA-Z]{2,}\.?$'` \
-            || "$hostname" =~ '^[a-zA-Z0-9\-\.]+\.[a-zA-Z]{2,}\.?$' ]]; then
-            # It's an FQDN. The dig should be done against a public DNS since the FQDN can be for a different domain.
+        # It's an FQDN. The dig should be done against a public DNS since the FQDN can be for a different domain.
+        #  When the FQDN is for a different domain, the name-server is very likely to reject the forwarding request.
+        if [[ -n `echo "$hostname" | grep -Poi '^[0-9a-z\-\.]+\.[a-z]{2,}\.?$'` ]]; then
             local MX_IP=$(dig a ${DEFAULT_OPTIONS} ${hostname} @8.8.8.8 | head -n1)
             MX_IP_LIST="${MX_IP_LIST} ${MX_IP}"
             hostname="${hostname} \t(Resolved IP: ${MX_IP})\n"
-            elif [[ "$hostname" =~ '^(\d{1,3}\.){3}\d{1,3}$' || "$hostname" =~ '^([0-9a-fA-F]{1,4})(::?[0-9a-fA-F]{1,4}){1,5}$' \
-                || -n `echo "$hostname" | grep -Poi '^(\d{1,3}\.){3}\d{1,3}$'` \
-            || -n `echo "$hostname" | grep -Poi '^([0-9a-fA-F]{1,4})(::?[0-9a-fA-F]{1,4}){1,5}$'` ]]; then
-            # MX host is already an IPv4 or IPv6 address.
+        elif [[ $(isValidIpv6Address "${hostname}") -eq 0 || $(isValidIpv4Address "${hostname}") -eq 0 ]]; then
+            # MX host is already an IP address item: no need to resolve it.
             hostname="${hostname}\n"
         else
-            # It's either the priority number, or it's something else invalid.
+            # It's either the priority number, or some other invalid particle.
             hostname="${hostname} "
         fi
         # Append the new hostname variable onto the output of the MX record.
@@ -245,57 +265,60 @@ function getMX() {
     echo -e "${TC_GREEN}MX Record(s)${TC_NORMAL}:\n${MX_RECORD_OUT}\n"
 }
 
-# Check PTR record for an IPv4 Address
-# ARGS:
+# getPTR
+# -- Check PTR record for an IPv4 or IPv6 address.
+# PARAMS:
 #   $1 = IP Address to lookup
 function getPTR() {
-    # validate IPv4 address
+    local PTR_RECORD=
+    # Check the value against the pattern for an IPv4 address.
     local IP4_PATTERN='^((1\d{2}|2[0-4]\d|25[0-5]|\d{1,2})\.){3}(1\d{2}|2[0-4]\d|25[0-5]|\d{1,2})$'
-    if [[ -n `echo "${1}" | grep -Poi "${IP4_PATTERN}"` ]]; then
-        # reverse IP address and append '.in-addr.arpa' and store separately to filter result
-        local REVERSED_IP=$(printf %s "${1}." | tac -s.)in-addr.arpa
-        # perform lookup and filter result
-        PTR_RECORD=$(dig ${DEFAULT_OPTIONS} ptr "${REVERSED_IP}" | tail -n1)
-        # test ANSWER to see if it is equal to "PTR" - if so, then there is no PTR found against this ip4 address
-        [ -z "${PTR_RECORD}" ] && PTR_RECORD="not defined"
-    else # Not an IPv4 Address - check to see if it is IPv6
-        ip_validation ${1}
-        [[ $? -ne 0 ]] && echo "Invalid IP Address" && usage
-        build_groups_array ${1}
-        expand_address
-        PTR_RECORD=$(dig ${DEFAULT_OPTIONS} ptr "${REVERSED_IP}" | tail -n1)
-        # test ANSWER to see if it is equal to "PTR" - if so, then there is no PTR found against this ip6 address
-        [ -z "${PTR_RECORD}" ] && PTR_RECORD="not defined"
+    if [[ $(isValidIpv4Address "${1}") -eq 0 ]]; then
+        # Reverse the IPv4 address and append '.in-addr.arpa'.
+        local REVERSED_IP="$(printf "%s" "${1}." | tac -s'.')in-addr.arpa"
+        # Perform the lookup and filter out the result.
+        local PTR_RECORD=$(dig ${DEFAULT_OPTIONS} ptr "${REVERSED_IP}" | tail -n1)
+    # If that fails, check for a valid IPv6 address.
+    elif [[ $(isValidIpv6Address "${1}") -eq 0 ]]; then
+        local REVERSED_IP=$(getIpv6ArpaAddress "${1}")
+        local PTR_RECORD=$(dig ${DEFAULT_OPTIONS} ptr "${REVERSED_IP}" | tail -n1)
+    # If that fails further, then it matched neither and is not a valid IP.
+    else
+        local PTR_RECORD="invalid IP"
     fi
-
+    # If no PTR record is defined, set the return value to "not defined".
+    [ -z "${PTR_RECORD}" ] && PTR_RECORD="not defined"
+    # Return the PTR record.
+    printf "${PTR_RECORD}"
 }
 
-# Run an RBL check against the web-server/A-record IP of the domain.
+# RBL_getALookup
+# -- Run an RBL check against the web-server/A-record IP of the domain.
 function RBL_getALookup() {
-    # Begin RBL Check
-    # set the A_RECORD variable
+    # Set the A_RECORD variable.
     A_RECORD=$(getA ${DOMAIN})
-
-    if [[ -z "${A_RECORD}" || \
-        -z `echo "${A_RECORD}" | grep -Poi '^((1\d{2}|2[0-4]\d|25[0-5]|\d{1,2})\.){3}(1\d{2}|2[0-4]\d|25[0-5]|\d{1,2})$'` ]]; then
+    # Ensure it's defined, and is a valid IPv4 address. If not, skip the RBL check.
+    if [[ -z "${A_RECORD}" || $(isValidIpv4Address "${A_RECORD}") -ne 0 ]]; then
         echo "DNS A-Record for ${DOMAIN} isn't defined; skipping A-record RBL check..."
     else
         # As long as the IP hasn't already been checked by RBLs, proceed.
-        ## Otherwise, skip with a notification.
+        #  Otherwise, skip with a notification.
         echo "Attempting A-record RBL check for ${A_RECORD}..."
-        getPTR ${A_RECORD}
+        local PTR_RECORD=$(getPTR "${A_RECORD}")
         echo "  --========--   ${TC_BOLD}${TC_PURPLE}${A_RECORD}${TC_NORMAL} (PTR: ${PTR_RECORD})    --========--  "
-        if [[ -z `echo "${RBL_CHECKED_IPS}" | grep -Poi "${A_RECORD}"` ]]; then
+        if [[ -z `echo "${RBL_CHECKED_IPS_A}" | grep -Poi "${A_RECORD}"` ]]; then
             lookupIP "${A_RECORD}" "b.barracudacentral.org" "Barracuda RBL"
-            RBL_CHECKED_IPS="${RBL_CHECKED_IPS} ${A_RECORD}"
+            RBL_CHECKED_IPS_A="${RBL_CHECKED_IPS_A} ${A_RECORD}"
         else echo "IP ${A_RECORD} has already been checked. Skipping."; fi
     fi
     echo
 
 }
 
-# Run an RBL check against all resolved IPs from the MX record entries.
+# RBL_getMXLookup
+# -- Run an RBL check against all resolved IPs from the MX record entries.
 function RBL_getMXLookup() {
+    # If there are no MX records, or no IPs were extracred from the list, do nothing.
     [[ "${MX_RECORD_OUT}" == "NONE" || -z "${MX_IP_LIST}" ]] && return
     # RBL Check on Mail Servers in MX records.
     echo "Attempting MX-record RBL check..."
@@ -304,24 +327,25 @@ function RBL_getMXLookup() {
     echo
 }
 
-# Check against all available DNSBL locations for this script.
-# ARGS:
+# checkAllRBLs
+# -- Check against all available DNSBL locations for this script.
+# PARAMS:
 #    $1 = Target IP Address
 function checkAllRBLs() {
     # Extract the PTR record from the IP address. If not defined, default.
-    getPTR ${1}
+    local PTR_RECORD=$(getPTR "${1}")
     [ -z "${PTR_RECORD}" ] && PTR_RECORD="not defined"
     # Start the output of the RBL checks.
     echo "  --========--   ${TC_BOLD}${TC_PURPLE}${1}${TC_NORMAL} (PTR: ${PTR_RECORD})    --========--  "
     [[ -n `echo "${RBL_CHECKED_IPS}" | grep -Poi "${1}"` ]] \
         && echo "IP ${1} has already been checked. Skipping." && return 1
+    # 20200104 - NOTE: Removed "MegaRBL" due to consistent false-positive results.
     lookupIP "${1}" "b.barracudacentral.org" "Barracuda RBL"
     lookupIP "${1}" "spam.dnsbl.sorbs.net" "SORBS Spam"
     lookupIP "${1}" "dnsbl-1.uceprotect.net" "UCEPROTECTL1"
     lookupIP "${1}" "bl.spamcop.net" "SpamCop"
     lookupIP "${1}" "noptr.spamrats.com" "SpamRats NoPTR (no-PTR-record spammers)"
     lookupIP "${1}" "dyna.spamrats.com" "SpamRats DYNA (suspicious PTR records)"
-    lookupIP "${1}" "rbl.megarbl.net" "MegaRBL"
     lookupIP "${1}" "zen.spamhaus.org" "Spamhaus ZEN"
     lookupIP "${1}" "dnsbl.spfbl.net" "SPFBL"
     lookupIP "${1}" "ubl.unsubscore.com" "LASHBACK"
@@ -331,40 +355,46 @@ function checkAllRBLs() {
     return 0
 }
 
-# Run an IP against the given RBL.
-# ARGS:
+# lookupIP
+# -- Run an IP against the given RBL.
+# --  This is a sub-function and usually isn't called from a high-level place in the script.
+# PARAMS:
 #    $1 = Target IP address,
 #    $2 = DNSBL location,
 #    $3 = (optional) RBL name.
 function lookupIP () {
     # Reverse the IP address to prepare it for the DNS record query.
-    local BRBL_LOOKUP=
-    for i in {4..1}; do local BRBL_LOOKUP="${BRBL_LOOKUP}`echo "${1}" | cut -d'.' -f${i}`."; done
-    local BRBL_LOOKUP="${BRBL_LOOKUP}${2}"
+    local RBL_LOOKUP=
+    # TODO: Replace this with a TAC call after finding an IP that's guaranteed blacklisted SOMEWHERE.
+    for i in {4..1}; do local RBL_LOOKUP="${RBL_LOOKUP}`echo "${1}" | cut -d'.' -f${i}`."; done
+    local RBL_LOOKUP="${RBL_LOOKUP}${2}"
     # Running this query against a public DNS service.
-    local IS_LISTED=$(dig a ${DEFAULT_OPTIONS} ${BRBL_LOOKUP} @8.8.8.8)
+    local IS_LISTED=$(dig a ${DEFAULT_OPTIONS} ${RBL_LOOKUP} @8.8.8.8)
     local CHECKING_INDICATOR=
     local CHECKING_RESULT=
     [ -n "$3" ] && local CHECKING_INDICATOR="Checking \"${TC_BOLD}${3}${TC_NORMAL}\" " \
         || local CHECKING_INDICATOR="Checking DNSBL at \"${TC_BOLD}${2}${TC_NORMAL}\" "
     if [ -n "$IS_LISTED" ]; then
+        # If the host is listed, attempt to deduce a reason, which is usually provided at the TXT record location.
         local CHECKING_RESULT="[${TC_RED}LISTED${TC_NORMAL}]"
-        local LISTED_REASON=$(dig txt ${DEFAULT_OPTIONS} ${BRBL_LOOKUP} @8.8.8.8)
+        local LISTED_REASON=$(dig txt ${DEFAULT_OPTIONS} ${RBL_LOOKUP} @8.8.8.8)
         local CHECKING_RESULT=`echo -e "${CHECKING_RESULT}\n ----> Given Reason (if any): ${LISTED_REASON}"`
     else local CHECKING_RESULT="[${TC_GREEN}NOT LISTED${TC_NORMAL}]"; fi
-
+    # Pretty-print the results of the RBL check.
     printf "%-65s : %s\n" "${CHECKING_INDICATOR}" "${CHECKING_RESULT}"
 }
 
-# Check a public DNS server if the chosen Name Server fails or times out on a lookup.
-# ARGS:
+# checkFallbackLookup
+# -- Check a public DNS server if the chosen Name Server fails or times out on a lookup.
+# PARAMS:
 #    $1 = Variable of previous DNS lookup.
 function checkFallbackLookup() {
     [[ "$1" =~ (timed out|unreachable|NXDOMAIN|not found) ]] && return 1 || return 0
 }
 
-# Actually do the lookup if the above check returns anything but 0.
-# ARGS:
+# fallbackLookup
+# -- Actually do the lookup if the above check returns anything but 0.
+# PARAMS:
 #    $1 = Record to look up.
 #    $2 = Record type (MX, TXT, etc).
 #    $3 = Target (public) DNS server.
@@ -375,121 +405,93 @@ function fallbackLookup() {
         echo "NONE"
     else echo "${FBLKUP}"; fi
 }
-################################################################
-######################  IPv6 Functions  ########################
-################################################################
 
-# Counts the number of groups given in the ipv6 address
-# ARGS:
-#   $1 = IPv6 Address.
-count_groups() {
-    local groups=$(echo ${1} | tr ':' ' ' | wc -w)
-    # ensure there are no more than 8 groups
-    [[ ${groups} -gt 8 ]] && echo "Too Many Groups Detected" && return 1
-    [[ ${groups} -lt 1 ]] && echo "Not Enough Groups Detected" && return 1
-    # set global group count var and return
-    GROUP_COUNT=${groups}
-    return 0
+
+
+################################################################
+#######################  IP Functions  #########################
+################################################################
+# NOTE: This section might instead be offloaded to the "Common"
+#        folder for the toolkit, if it ends up needed anywhere
+#        else in the project.
+
+
+# isValidIpv4Address
+# -- Returns a '0' if the given string represents a valid IPv4 address.
+# --  Otherwise, it returns a '1' value.
+# PARAMS:
+#   $1 = A string representing an IPv4 address, to test for validity.
+function isValidIpv4Address() {
+    # This function is simply checking a regular expression for a valid address between
+    #  0.0.0.0 and 255.255.255.255, where no octet has a number greater than 255, or lower than 0.
+    [[ -n `echo "${1}" | grep -Poi '^((1\d{2}|2[0-4]\d|25[0-5]|\d{1,2})\.){3}(1\d{2}|2[0-4]\d|25[0-5]|\d{1,2})$'` ]]
+    echo $?
 }
 
-# Checks the validity of the given IPv6 Address
-# Only Base 16 digits and {:|::} are allowed
-# ARGS:
-#   $1 = IPv6 Address
-ip_validation() {
-    [[ ! ${1} =~ ^[0-9a-fA-F\:]+$ || ${1} =~ [\:]{3} || $(echo ${1} | grep "::" -o | wc -l) -gt 1 ]] \
-        && return 1
-    # group count
-    count_groups ${1}
-    [[ $? -ne 0 ]] && return 1
-    return 0
+# isValidIpv6Address
+# -- Returns a '0' if the given string represents a valid IPv6 address.
+# --  Otherwise, it returns a '1' value.
+# PARAMS:
+#   $1 = A string representing an IPv6 address, to test for validity.
+function isValidIpv6Address() {
+    local STRING_DOUBLE_COLON_COUNT=$(echo "${1}" | grep -o '::' | wc -l)
+    local STRING_IMPROPER_COLONS=$(echo "${1}" | grep -Poi ':{3}')
+    local STRING_MATCHES_PATTERN=$(echo "${1}" | grep -Poi '^[0-9a-f\:]+$')
+    local STRING_BLOCK_SIZE=$(for x in `echo "${1}" | tr ':' ' '`; do printf "$x" | grep -Poi '[0-9a-z]{5,}'; done)
+    local STRING_GROUPS_COUNT=$(echo "${1}" | tr ':' ' ' | wc -w)
+    # A valid IPv6 address consists of the following requirements:
+    #   - 0 or 1 double-colon group,
+    #   - no consecutive colon count >2,
+    #   - hex characters (and colons) only,
+    #   - each 'group' has only 1-4 characters,
+    #   - and 1 to 8 'groups' of hex digits.
+    # *** Additionally, the double-colon is NECESSARY if (and only if) the group count is less than 8.
+    [[ ( ( $STRING_DOUBLE_COLON_COUNT -eq 1 && $STRING_GROUPS_COUNT -ge 1 && $STRING_GROUPS_COUNT -lt 8 ) \
+      || ( $STRING_DOUBLE_COLON_COUNT -eq 0 && $STRING_GROUPS_COUNT -eq 8 ) ) \
+      && -z "${STRING_IMPROPER_COLONS}" \
+      && -n "${STRING_MATCHES_PATTERN}" && -z "${STRING_BLOCK_SIZE}" \
+      && $STRING_GROUPS_COUNT -ge 1 && $STRING_GROUPS_COUNT -le 8 ]]
+    # Return the result of the boolean calculation above.
+    echo $?
 }
 
-# Sets the value of ZERO_START to be the start of the zeros
-# Sets the value of ZERO_END to be the end of the zeros
-# ARGS:
-#   $1 = IPv6 Address
-find_zeros() {
-    # group count = 8 indicates that there is no :: in the address
-    if [[ ${GROUP_COUNT} -ne 8 ]]; then
-        # find location of :: and save in ZERO_START variable
-        for ((i=0; i < 8; i += 1)); do
-            local group=$(echo ${1} | cut -d: -f$((${i}+1)))
-            # this line performs the array front-load
-            GROUPS_ARRAY[${i}]=${group}
-            # ZERO_START is the first group that reads as an empty string, ZERO_END = (MAX_GROUPS - GROUP_COUNT + ZERO_START)
-            [[ ${group} == "" ]] && ZERO_START=$((${i})) && ZERO_END=$((8-${GROUP_COUNT}+${ZERO_START})) && return 0
-        done
+# getIpv6ArpaAddress
+# -- Return a string of a reversed IPv6 address.
+# --  Ex: 2001:db8:34::1 --> 1.0.0.0.0.0.[...].4.3.0.0.8.b.d.0.1.0.0.2.ip6.arpa
+# PARAMS:
+#    $1 = A string value representing an IPv6 address.
+function getIpv6ArpaAddress() {
+    local GROUPS_COUNT=$(echo "${1}" | tr ':' ' ' | wc -w)
+    local EXPANDED_ADDRESS="${1}"
+    # If there are fewer than 8 groups, expand the double-colon outward.
+    if [[ $GROUPS_COUNT -lt 8 ]]; then
+        local EXPANSION_ZEROES=
+        for (( i = 0; i < (8 - $GROUPS_COUNT); i++ )); do EXPANSION_ZEROES="${EXPANSION_ZEROES}:0000"; done
+        EXPANDED_ADDRESS=$(echo "${EXPANDED_ADDRESS}" | sed -r 's/::/'"${EXPANSION_ZEROES}"':/')
     fi
-}
-
-# ARGS:
-#   $1 = IPv6 Address
-build_groups_array() {
-    find_zeros ${1}
-    local offset=-1 # offset is used to offset cut fields after zeros have been written to the array
-    # fill an indexed array with the groups
-    for ((i=0; i < 8; i += 1)); do
-        if [[ (${i} -ge ${ZERO_START} && ${i} -lt ${ZERO_END}) ]]; then
-            GROUPS_ARRAY[${i}]='0000'
-            ((offset++))
-            continue
-        fi
-        # fill an indexed array with the groups
-        if [[ ${offset} -eq -1 ]]; then
-            local group=$(echo ${1} | cut -d: -f$((${i}+1)))
-        else
-            local group=$(echo ${1} | cut -d: -f$((${i}+1-${offset})))
-        fi
-        GROUPS_ARRAY[${i}]=${group}
+    # Any groups with fewer than 4 characters should be prepended with zeroes.
+    local FULL_IP=
+    for group in `echo "${EXPANDED_ADDRESS}" | tr ':' ' '`; do
+        local FILLED_GROUP="0000${group}"
+        # Spit out the last 4 characters of the string crafted above ("0000****").
+        #  If the "group" variable is fewer than 4 characters, this will prepend the right amount of zeroes.
+        #  NOTE: This can also be done with a "grep -Poi '[0-9]{4}$'" as well, if the below proves unreliable.
+        FULL_IP="${FULL_IP}:${FILLED_GROUP:`echo "${FILLED_GROUP}" | wc -c` - 5:4}"
     done
-    # test for ::nnnn (edge case)
-    [[ ${1} =~ ^::[0-9a-fA-F]{1,4}$ && ${i} -eq 8 ]] && GROUPS_ARRAY[7]=$(echo ${1} | cut -d: -f3)
-    # rewrite elements to be 4 chars long each
-    for ((i=0; i < 8; i += 1)); do
-        expand_group ${GROUPS_ARRAY[${i}]} ${i}
-    done
+    # Clean up the : prepended onto this final expanded address.
+    local FULL_IP="${FULL_IP:1}"
+    # Remove colons, insert a period between each digit, and reverse the entire thing with 'tac -s.'.
+    local ARPA_IP_PREFIX=$(printf "${FULL_IP}" | tr -d ':' | sed -r 's/([0-9a-fA-F])/\1./g' | tac -s'.')
+    # Return the ARPA_IP_PREFIX variable, appended with '.ip6.arpa'.
+    echo "${ARPA_IP_PREFIX}ip6.arpa"
 }
 
-# Expands an IPv6 group to 4 digits
-# ARGS:
-#   $1 = group
-#   $2 = group array index
-expand_group() {
-    local zeros_to_add=$((4-$(echo -n ${1} | wc -m)))
-    for ((n=0; n < ${zeros_to_add}; n += 1)); do
-        local new_group="${new_group}0"
-    done
-    local new_group="${new_group}${1}"
-    GROUPS_ARRAY[${2}]=${new_group}
-}
 
-# Expands and delimits an IPv6 Address, then reverses it to be used for PTR lookups
-expand_address() {
-    delimit_address
-    reverse_address
-}
-
-# Reverses an expanded and delimited IPv6 Address and append .ip6.arpa.
-reverse_address() {
-    REVERSED_IP=$(echo "$(echo ${FULL_IP} | tac -s. | sed 's,.$,,').ip6.arpa." | tr -d '\n')
-}
-
-# Delimits an expanded IPv6 Address with '.'
-delimit_address() {
-    FULL_IP=
-    # iterate over the array and concatenate each element into one string
-    for ((i=0; i < 8; i += 1)); do
-        FULL_IP="${FULL_IP}${GROUPS_ARRAY[${i}]}"
-    done
-    # add . between each digit
-    FULL_IP=$(echo ${FULL_IP} | sed 's,.,&.,g')
-}
 
 ################################################################
 ################################################################
 ################################################################
 ################################################################
-# main function.
+# Main function.
 quickDNS_main "$@"
 exit 0

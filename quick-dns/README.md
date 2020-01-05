@@ -5,11 +5,13 @@ A script written to quickly gather email information about a certain domain. Sup
 + DMARC lookup.
 + MX-record lookup.
 + RBL check against for the A-record of the domain (_the hosting web server_) and the MX-record(s).
++ A designated, extensive RBL check for a specified IP (using the `-r` flag for IPv4, and `-R` for IPv6).
 
 ## TODO
 + [X] Add reverse-DNS lookup to both the A-record and the MX-record hosts. Warn the user if there are hosts without a valid PTR record.
-+ [ ] For RBL lookups, many of these providers use specific codes for the reason of the block. Maybe send this output to the user for more info. For example, see https://spfbl.net/en/dnsbl/.
-+ [ ] Complete IPv6 support.
++ [-] ~~For RBL lookups, many of these providers use specific codes for the reason of the block. Maybe send this output to the user for more info. For example, see https://spfbl.net/en/dnsbl/.~~ _NOTE_ (2020-01-05): This is really not worth pursuing, due to the complexity and obscurity of vendor codes, it would be easier for an administrator to just contact the organization during the de-listing process anyway to find out the reason.
++ [X] Complete IPv6 support.
+  - Note (2020-01-05): The IPv6 parsing seems to be fully supported and consolidated now for rDNS.
 
 ## Sample Bash Output
 ```
