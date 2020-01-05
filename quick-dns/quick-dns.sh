@@ -54,7 +54,7 @@ function usage() {
     echo "    -R    Same as above but with IPv6 addresses."
     echo
     echo "NOTES:"
-    echo " - Multiple space-separated domains can be passed to this script"
+    echo " - Multiple space-separated domains can be passed to this script,"
     echo " -- but the list must be double-quoted."
     echo " - You can only check ONE IP ADDRESS at a time with the -R or -r flags."
     exit 1
@@ -72,13 +72,16 @@ function quickDNS_main() {
 
     # Run RBL Lookup function if -r or -R flag was present.
     if [[ -n "${V4_LOOKUP}" || -n "${V6_LOOKUP}" ]]; then
+        # The below will work because only one of the two can be defined anyway for the script to pass initialization.
+        local RBL_CHECK_ADDR="${V4_LOOKUP}${V6_LOOKUP}"
+        # Check if the getPTR function returns an 'invalid IP' warning -- this goes for v4 or v6.
         if [[ "$(getPTR "${RBL_CHECK_ADDR}")" == "invalid IP" ]]; then
             echo "Invalid IP address provided. Please review the address given and correct any mistakes."
             echo && exit 180
         fi
-        # The below will work because only one of the two can be defined anyway for the script to pass initialization.
-        echo "Checking RBLs for IP address: ${TC_PURPLE}${V4_LOOKUP}${V6_LOOKUP}${TC_NORMAL}"
-        checkAllRBLs "${V4_LOOKUP}${V6_LOOKUP}"
+        # Run the check and exit gracefully.
+        echo "Checking RBLs for IP address: ${TC_PURPLE}${RBL_CHECK_ADDR}${TC_NORMAL}"
+        checkAllRBLs "${RBL_CHECK_ADDR}"
         echo && exit 0
     fi
 
@@ -97,8 +100,7 @@ function quickDNS_main() {
         getMX
         # Reset the list of IP addresses that have already been checked against RBLs.
         #  This 'tracker' actually probably shouldn't be reset, but keeping this for now.
-        RBL_CHECKED_IPS=
-        RBL_CHECKED_IPS_A=
+        clearVars "RBL_CHECKED_IPS RBL_CHECKED_IPS_A"
         # Check the A-record IP against RBLs, then the MX record IP(s).
         RBL_getALookup
         RBL_getMXLookup
@@ -165,7 +167,7 @@ function initialize() {
 # printBanner
 # -- Print a header banner for a section (IP or hostname/domain).
 # PARAMS:
-#   $1 The domain name or IP adress used to print the banner
+#   $1 = The domain name or IP adress used to print the banner
 function printBanner() {
     echo "################################################################################"
     echo "Checking DNS information for ${TC_BOLD}${TC_YELLOW}${1}${TC_NORMAL}..."
@@ -173,8 +175,10 @@ function printBanner() {
 
 # clearVars
 # -- Clear all variables associated with the below DNS lookup/parsing functions (in the Script Modules section).
+# PARAMS:
+#   $1 = A space-separated list of variable names to clear.
 function clearVars() {
-    for x in "$@"; do unset `echo $x`; done
+    for x in "$@"; do unset $x; done
 }
 
 # getNameServers
@@ -434,7 +438,7 @@ function isValidIpv4Address() {
 #   $1 = A string representing an IPv6 address, to test for validity.
 function isValidIpv6Address() {
     local STRING_DOUBLE_COLON_COUNT=$(echo "${1}" | grep -o '::' | wc -l)
-    local STRING_IMPROPER_COLONS=$(echo "${1}" | grep -Poi ':{3}')
+    local STRING_IMPROPER_COLONS=$(echo "${1}" | grep -Poi ':{3,}')
     local STRING_MATCHES_PATTERN=$(echo "${1}" | grep -Poi '^[0-9a-f\:]+$')
     local STRING_BLOCK_SIZE=$(for x in `echo "${1}" | tr ':' ' '`; do printf "$x" | grep -Poi '[0-9a-z]{5,}'; done)
     local STRING_GROUPS_COUNT=$(echo "${1}" | tr ':' ' ' | wc -w)
@@ -448,8 +452,7 @@ function isValidIpv6Address() {
     [[ ( ( $STRING_DOUBLE_COLON_COUNT -eq 1 && $STRING_GROUPS_COUNT -ge 1 && $STRING_GROUPS_COUNT -lt 8 ) \
       || ( $STRING_DOUBLE_COLON_COUNT -eq 0 && $STRING_GROUPS_COUNT -eq 8 ) ) \
       && -z "${STRING_IMPROPER_COLONS}" \
-      && -n "${STRING_MATCHES_PATTERN}" && -z "${STRING_BLOCK_SIZE}" \
-      && $STRING_GROUPS_COUNT -ge 1 && $STRING_GROUPS_COUNT -le 8 ]]
+      && -n "${STRING_MATCHES_PATTERN}" && -z "${STRING_BLOCK_SIZE}" ]]
     # Return the result of the boolean calculation above.
     echo $?
 }
